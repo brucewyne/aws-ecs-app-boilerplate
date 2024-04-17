@@ -1,0 +1,53 @@
+name: Feature QA Teardown
+on:
+  pull_request:
+    types:
+      - closed
+
+concurrency:
+  group: app-${{ github.event.number }}
+
+jobs:
+
+  dns:
+    name: Manage DNS
+    runs-on: ubuntu-latest
+    if: "!startsWith(github.ref, 'refs/heads/dependabot/')"
+    steps:
+      - name: Remove CNAME from CloudFlare
+        uses: infraway/delete-dns-record@v2.1
+        with:
+          name: "app-pr-${{ github.event.number }}.mydomain.com"
+          token: ${{ secrets.CLOUDFLARE_TOKEN }}
+          zone: ${{ secrets.CLOUDFLARE_ZONE }}
+
+  destroy:
+    name: AWS Teardown
+    runs-on: ubuntu-latest
+    if: "!startsWith(github.ref, 'refs/heads/dependabot/')"
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 0.14.11
+
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: terraform destroy
+        uses: dflook/terraform-destroy@v1
+        with:
+          path: terraform/preview
+          backend_config: key=app-pr-${{ github.event.number }}
+          variables: |
+            service_name="app-pr-${{ github.event.number }}"
+            docker_image="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:pr-${{ github.event.number }}"

@@ -1,0 +1,131 @@
+name: Feature Deploy
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+
+concurrency:
+  group: app-${{ github.event.number }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: app-repository
+
+jobs:
+
+  dns:
+    name: Create Dynamic Subdomain
+    if: github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Manage Cloudflare DNS
+        uses: rez0n/create-dns-record@v2.2
+        with:
+          type: "CNAME"
+          name: "app-pr-${{ github.event.number }}.mydomain.com"
+          content: "load-balancer.aws.com" # fill from load balancers public domain
+          ttl: 1
+          proxied: true
+          token: ${{ secrets.CLOUDFLARE_TOKEN }}
+          zone: ${{ secrets.CLOUDFLARE_ZONE }}
+
+
+  build:
+    name: Build
+    needs: node_version
+    runs-on: ubuntu-latest
+    if: github.actor != 'dependabot[bot]'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ needs.node_version.outputs.node_version }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Docker Build and Push
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:pr-${{ github.event.number }}
+
+  deploy:
+    name: Deploy Feature Preview
+    runs-on: ubuntu-latest
+    if: github.actor != 'dependabot[bot]'
+    needs:
+      - build
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 0.14.11
+
+      - name: Create or Update ECS Service
+        uses: dflook/terraform-apply@v1
+        with:
+          path: terraform/preview
+          auto_approve: true
+          backend_config: key=app-pr-${{ github.event.number }}
+          variables: |
+            service_name="app-pr-${{ github.event.number }}"
+            docker_image="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:pr-${{ github.event.number }}"
+
+  finalize:
+    name: Finalize
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - deploy
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: PR Comment
+        if: github.event.action == 'opened' && github.actor != 'dependabot[bot]'
+        uses: thollander/actions-comment-pull-request@v2
+        with:
+          message: |
+            PR-${{ github.event.number }} QA is Ready. URL: https://app-pr-${{ github.event.number }}.mydomain.com
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Slack Workflow Notification
+        uses: Gamesight/slack-workflow-status@master
+        with:
+          repo_token: ${{secrets.GITHUB_TOKEN}}
+          slack_webhook_url: ${{secrets.SLACK_NOTIFICATION_WEBHOOK}}
+          channel: '#deployments'
