@@ -16,10 +16,7 @@ provider "aws" {
 terraform {
   backend "s3" {
     bucket = "myorg-terraform-infrastructure"
+    key = "production"
     region = "us-east-1"
   }
-}
-
-locals {
-  lb_arn = "arn:aws:elasticloadbalancing:us-east-1:..." //replace with ARN
 }
